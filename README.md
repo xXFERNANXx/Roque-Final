@@ -26,11 +26,9 @@
     - [Pasos para el despliegue](#pasos-para-el-despliegue)
   - [Errores Comunes y Soluciones](#errores-comunes-y-soluciones)
     - [1. Conexión rechazada entre frontend y backend](#1-conexión-rechazada-entre-frontend-y-backend)
-    - [2. Assets no encontrados (404)](#2-assets-no-encontrados-404)
-    - [3. PostgreSQL no se conecta](#3-postgresql-no-se-conecta)
+    - [2. PostgreSQL no se conecta](#2-postgresql-no-se-conecta)
   - [Comandos Útiles](#comandos-útiles)
   - [Consideraciones de Seguridad](#consideraciones-de-seguridad)
-  - [Optimización y Rendimiento](#optimización-y-rendimiento)
 
 ## Introducción
 
@@ -71,6 +69,7 @@ ROQUE-FINAL/
 ├── frontend/
 │   ├── public/                # Assets públicos
 │   ├── src/                   # Código fuente del frontend
+│   ├── ssl/                   # Certificados SSL
 │   ├── .dockerignore          # Archivos a ignorar en Docker
 │   ├── Dockerfile             # Configuración Docker para frontend
 │   ├── nginx.conf             # Configuración de Nginx
@@ -85,6 +84,7 @@ ROQUE-FINAL/
 ### Dockerfile Backend
 
 ```dockerfile
+# Etapa de construcción
 FROM node:22-alpine AS builder
 
 WORKDIR /app
@@ -94,6 +94,7 @@ RUN npm ci
 COPY . .
 RUN npm run build
 
+# Etapa de ejecución
 FROM node:22-alpine
 WORKDIR /app
 
@@ -131,18 +132,24 @@ CMD ["/bin/sh", "-c", "/wait-for-postgres.sh db ${DB_PORT} ${DB_USERNAME} ${DB_N
 ### Dockerfile Frontend
 
 ```dockerfile
+# Etapa de construcción
 FROM node:22-alpine as builder
-
 WORKDIR /app
-COPY package.json package-lock.json ./
+COPY package*.json ./
 RUN npm ci
 COPY . .
 RUN npm run build
 
+# Etapa de producción
 FROM nginx:alpine
+# Copiar archivos SSL
+COPY ./ssl/mundoanime.crt /etc/nginx/ssl/
+COPY ./ssl/mundoanime.key /etc/nginx/ssl/
+# Configuración Nginx
+COPY ./nginx.conf /etc/nginx/conf.d/default.conf
+# Aplicación
 COPY --from=builder /app/dist /usr/share/nginx/html/MundoAnime
-COPY nginx.conf /etc/nginx/conf.d/default.conf
-EXPOSE 80
+EXPOSE 80 443
 CMD ["nginx", "-g", "daemon off;"]
 ```
 
@@ -159,6 +166,9 @@ CMD ["nginx", "-g", "daemon off;"]
 3. **Configuración Nginx**:
    - Montaje de la aplicación en `/MundoAnime` para rutas personalizadas
    - Archivo de configuración específico para SPAs
+  
+4. **Implementación de SSL**:
+   - Se realizó la implementación de un certificado SSL a la pagina.
 
 ### Docker Compose
 
@@ -168,6 +178,7 @@ version: '3.8'
 services:
   db:
     image: postgres:14.4
+    restart: always
     environment:
       POSTGRES_USER: ${DB_USERNAME:-postgres}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
@@ -176,12 +187,22 @@ services:
       - ./backend/postgres:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-postgres} -d ${DB_NAME:-mundoanime}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
     networks:
       - mundoanime-net
 
   backend:
-    build: ./backend
-    env_file: .env
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      DB_PORT: 5432
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+    env_file:
+      - .env
     ports:
       - "${BACKEND_PORT:-3000}:3000"
     depends_on:
@@ -189,13 +210,15 @@ services:
         condition: service_healthy
     networks:
       - mundoanime-net
-
+    restart: unless-stopped
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    env_file:
+      - .env
     ports:
-      - "${FRONTEND_PORT:-5000}:80"
-    volumes:
-      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf
+      - "${FRONTEND_PORT}:443"
     depends_on:
       - backend
     networks:
@@ -211,7 +234,7 @@ networks:
 1. **Servicio PostgreSQL**:
    - Utiliza versión específica (14.4) para consistencia
    - Configuración mediante variables de entorno con valores predeterminados
-   - Verificación de salud que garantiza disponibilidad antes de iniciar el backend
+   - Verificación que garantiza disponibilidad antes de iniciar el backend
    - Persistencia de datos mediante volumen dedicado
 
 2. **Servicio Backend**:
@@ -233,43 +256,103 @@ networks:
 ### Vite (Frontend)
 
 ```javascript
-import { defineConfig } from 'vite'
+import { defineConfig } from "vite";
+import tailwindcss from "@tailwindcss/vite";
+import react from "@vitejs/plugin-react";
 
 export default defineConfig({
-  base: '/MundoAnime/',
+  base: '/MundoAnime',
+  plugins: [tailwindcss(), react()],
   server: {
     proxy: {
       '/api': {
         target: 'http://backend:3000',
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api/, '')
-      }
-    }
-  }
-})
+        rewrite: (path) => path.replace(/^\/api/, ''),
+      },
+    },
+  },
+});
 ```
 
 #### Explicación:
 
 - **Base path**: Configura la aplicación para servirse desde `/MundoAnime/`
-- **Proxy API**: Redirige solicitudes `/api` al backend durante desarrollo
-- **Rewrite**: Elimina el prefijo `/api` antes de enviar al backend
+- **Proxy API**: Redirige solicitudes `/api` al backend
+- **Rewrite**: Remplaza las solicitudes que comienzan con el prefijo `/api` antes de enviar al backend
 
 ### Nginx (Frontend)
 
 ```nginx
 server {
-  listen 80;
+    listen 80;
+    server_name localhost;
+    
+    return 301 https://$host:5001/MundoAnime;
 
-  location /MundoAnime {
-    alias /usr/share/nginx/html/MundoAnime;
-    try_files $uri $uri/ /MundoAnime/index.html;
-  }
+    location = / {
+        return 302 https://$host:5001/MundoAnime;
+    }
 
-  location /api {
-    proxy_pass http://backend:3000;
-    proxy_set_header Host $host;
-  }
+    location = /MundoAnime {
+        return 301 https://$host:5001/MundoAnime/;
+    }
+}
+
+server {
+    listen 443 ssl;
+    server_name localhost;
+
+    # Certificados SSL
+    ssl_certificate /etc/nginx/ssl/mundoanime.crt;
+    ssl_certificate_key /etc/nginx/ssl/mundoanime.key;
+    
+    # Configuración SSL
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+
+    # Configuración para mantener rutas consistentes
+    port_in_redirect on;
+    absolute_redirect off;
+
+    # Configuración principal de la aplicación
+    location /MundoAnime {
+        alias /usr/share/nginx/html/MundoAnime;
+        try_files $uri $uri/ /MundoAnime/index.html;
+        
+        # Headers de caché y seguridad
+        add_header Cache-Control "no-cache, no-store, must-revalidate";
+        add_header Pragma "no-cache";
+        add_header Expires 0;
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    }
+
+    # Configuración del proxy para el backend
+    location /api {
+        proxy_pass http://backend:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+        
+        rewrite ^/api/(.*)$ /$1 break;
+    }
+    location = / {
+        return 302 https://$host:5001/MundoAnime;
+    }
+
+    location = /MundoAnime {
+        return 301 https://$host:5001/MundoAnime/;
+    }
+
+    # Manejo de errores
+    error_page 404 /MundoAnime/index.html;
+    error_page 500 502 503 504 /MundoAnime/index.html;
 }
 ```
 
@@ -278,6 +361,7 @@ server {
 - **Alias para SPA**: Sirve la aplicación desde `/MundoAnime`
 - **History API Fallback**: Redirige rutas no encontradas a `index.html` para soporte de enrutamiento SPA
 - **Proxy inverso**: Redirige peticiones `/api` al servicio backend
+- **Certificado SSL**: Realiza la redireccion de http a https en la página
 
 ### CORS (Backend)
 
@@ -301,7 +385,7 @@ app.enableCors({
 
 ### Requisitos previos
 
-- Docker (versión 20.10+)
+- Docker (versión 25.0+)
 - Docker Compose (versión 2.0+)
 - Al menos 2GB de RAM disponible
 - 1GB de espacio en disco
@@ -310,8 +394,8 @@ app.enableCors({
 
 1. **Clonar el repositorio**:
    ```bash
-   git clone <repositorio> ROQUE-FINAL
-   cd ROQUE-FINAL
+   git clone Roque-Final
+   cd Roque-Final
    ```
 
 2. **Configurar variables de entorno**:
@@ -332,14 +416,14 @@ app.enableCors({
    ```
 
 5. **Acceder a la aplicación**:
-   - Frontend: http://localhost:5000/MundoAnime
+   - Frontend: https://localhost:5001/MundoAnime
    - API: http://localhost:3000
 
 ## Errores Comunes y Soluciones
 
 ### 1. Conexión rechazada entre frontend y backend
 
-**Síntomas**:
+**Problemas**:
 - Error 502 Bad Gateway
 - Mensajes CORS en consola del navegador
 
@@ -357,35 +441,9 @@ app.enableCors({
 
 - Asegurar CORS configurado correctamente:
   - Revisar configuración en `app.module.ts`
-  - Validar que los orígenes incluyan `http://localhost:5000`
+  - Validar que los orígenes incluyan `http://localhost:5001`
 
-### 2. Assets no encontrados (404)
-
-**Síntomas**:
-- CSS/JS no se cargan
-- Imágenes rotas
-
-**Soluciones**:
-
-- Verificar configuración base en `vite.config.js`:
-  ```javascript
-  base: '/MundoAnime/'
-  ```
-
-- Asegurar que las rutas en el código sean relativas:
-  ```javascript
-  // Correcto
-  import logo from './assets/logo.png';
-  // Incorrecto
-  import logo from '/assets/logo.png';
-  ```
-
-- Revisar permisos en el contenedor:
-  ```bash
-  docker-compose exec frontend ls -la /usr/share/nginx/html/MundoAnime
-  ```
-
-### 3. PostgreSQL no se conecta
+### 2. PostgreSQL no se conecta
 
 **Síntomas**:
 - Timeouts en el backend
@@ -451,42 +509,10 @@ cat backup.sql | docker-compose exec -T db psql -U postgres mundoanime
 
 2. **Restricción de Puertos**:
    - Exponer solo los puertos necesarios (80/443 para frontend, ninguno para DB)
-   - Considerar configurar un reverse proxy externo (Traefik, Nginx) para TLS
 
-3. **Actualizaciones de Imágenes**:
-   - Mantener base images actualizadas para parches de seguridad
-   - Utilizar versiones específicas en lugar de tags `latest`
-
-4. **CORS y Seguridad API**:
+3. **CORS y Seguridad API**:
    - Limitar orígenes permitidos estrictamente
-   - Implementar rate limiting en producción
-
-## Optimización y Rendimiento
-
-1. **Caché de Docker**:
-   - Estructura Dockerfiles para aprovechar caché de capas
-   - Usar multi-stage builds para reducir tamaño final
-
-2. **Nginx Performance**:
-   - Habilitar compresión gzip para activos estáticos
-   - Configurar caché de navegador con cabeceras apropiadas
-
-3. **Reducción de Tamaño**:
-   - Utilizar imágenes alpine cuando sea posible
-   - Eliminar archivos temporales y caché de npm
-
-4. **Gestión de Recursos**:
-   - Configurar límites de memoria y CPU en entornos de producción:
-     ```yaml
-     services:
-       backend:
-         deploy:
-           resources:
-             limits:
-               cpus: '0.5'
-               memory: 512M
-     ```
 
 ---
 
-*Esta documentación fue generada para el proyecto MundoAnime. Para más información o soporte, contacte al equipo de desarrollo.*
+*Esta documentación fue generada para el proyecto MundoAnime. Y claramente no fue elaborada por mí, pero a mi me fue útil para comprender el proyecto y sus componentes. Espero que sea de ayuda para otros desarrolladores, y que se pueda utilizar como guía para futuros proyectos, Para más información o soporte, contacte al equipo de desarrollo.*
