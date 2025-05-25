@@ -12,12 +12,12 @@ export class CreateAnimeDto {
     synopsis: string;
 
     @IsOptional()
-    @IsDate({ message: 'Formato de fecha inválido' })
+    @IsDate({ message: 'Formato de fecha Inicio inválido' })
     @Type(() => Date)
     releaseDate: Date;
 
     @IsOptional()
-    @IsDate({ message: 'Formato de fecha inválido' })
+    @IsDate({ message: 'Formato de fecha Finalizado inválido' })
     @Type(() => Date)
     endDate?: Date;
 

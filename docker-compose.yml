@@ -24,8 +24,12 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     environment:
+      DB_HOST: db
       DB_PORT: 5432
+      DB_USERNAME: ${DB_USERNAME:-postgres}
       DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      DB_NAME: ${DB_NAME:-mundoanime}
+      NODE_ENV: production
     env_file:
       - .env
     ports:
@@ -36,6 +40,7 @@ services:
     networks:
       - mundoanime-net
     restart: unless-stopped
+    
   frontend:
     build:
       context: ./frontend
